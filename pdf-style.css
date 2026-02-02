@@ -1,0 +1,68 @@
+/* PDF 定製樣式 - 極致相容性版 */
+/* 移除所有外部 Web Fonts 與複雜圖形屬性，確保各平台閱讀器穩定加載 */
+
+:root {
+    --primary: #0044cc;
+    --text: #000000;
+    --bg: #ffffff;
+    --border: #cccccc;
+}
+
+body {
+    /* 使用系統內建字體，避免 Type 3 字體封裝錯誤 */
+    font-family: "Microsoft JhengHei", "Apple LiGothic Medium", "PingFang TC", Arial, sans-serif;
+    line-height: 1.5;
+    color: var(--text);
+    padding: 1cm;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+}
+
+h1,
+h2,
+h3 {
+    color: var(--primary);
+    border-bottom: 1pt solid var(--border);
+    padding-bottom: 4pt;
+    margin-top: 18pt;
+}
+
+h1 {
+    font-size: 24pt;
+    text-align: center;
+    border-bottom: 2pt solid var(--primary);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12pt 0;
+}
+
+th,
+td {
+    border: 0.5pt solid var(--border);
+    padding: 6pt;
+    text-align: left;
+}
+
+th {
+    background-color: #eeeeee;
+}
+
+blockquote {
+    border-left: 4pt solid var(--primary);
+    background-color: #f9f9f9;
+    padding: 8pt;
+    margin: 12pt 0;
+}
+
+@media print {
+    body {
+        padding: 0;
+    }
+
+    tr {
+        page-break-inside: avoid;
+    }
+}
