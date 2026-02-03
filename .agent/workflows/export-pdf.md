@@ -1,5 +1,5 @@
 ---
-description: 將指定的 Markdown 檔案轉換為高品質 PDF 報告
+description: 將指定的 Markdown 檔案轉換為高品質 PDF 試題
 ---
 
 # PDF 轉換工作流
@@ -26,5 +26,5 @@ description: 將指定的 Markdown 檔案轉換為高品質 PDF 報告
 `/export-pdf [檔案路徑]`
 
 **範例**:
-- `/export-pdf sessions/session_2026-01-21.md`
-- `/export-pdf stock/2330.TW-分析.md`
+- `/export-pdf exams/generated/mock-exam-20260201-comprehensive-printable.md`
+- `/export-pdf exams/generated/mock-exam-20260201-comprehensive.md`
