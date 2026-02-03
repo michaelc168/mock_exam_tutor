@@ -7,6 +7,10 @@
 - **.agent/**: 存放 AI 代理的技能 (skills) 與工作流程 (workflows)，用於自動化出題任務。
 - **exams/**: 用於存放題庫。
 - **bank/**: 用於存放題庫。
+- **generated/**: 用於存放生成的題庫。
+- **templates/**: 用於存放題庫。
+- **report/**: 用於存放題庫。
+- **scripts/**: 用於存放 Python 腳本。
 - **pdf-style.css**: PDF 样式設定。
 - **requirements.txt**: 放置 Python 腳本或設定檔 (如爬蟲、數據分析工具)。
 
