@@ -1,0 +1,34 @@
+---
+description: 將 Markdown 試卷轉換為高品質 PDF
+globs: exams/generated/**/*.md
+alwaysApply: false
+---
+
+# PDF 轉換工作流程
+
+## 環境需求
+- 需要 `md-to-pdf` 套件
+- 檢查指令：`node -e "require('md-to-pdf')"`
+
+## 執行步驟
+
+### 1. 確認來源檔案
+- 確認目標 Markdown 檔案存在於 `exams/generated/`
+
+### 2. 數學公式處理
+- 將 LaTeX 格式（如 `$3 \times (y - 5)$`）轉換為易讀格式
+- 確保小六生可以理解
+
+### 3. 執行轉換
+```bash
+node convert.js <目標檔案路徑>
+```
+
+### 4. 確認產出
+- PDF 檔案會存放於相同目錄或 `exports/`
+- 使用 `pdf-style.css` 樣式
+
+## 使用範例
+```
+請將 exams/generated/mock-exam-20260201-comprehensive.md 轉換為 PDF
+```
