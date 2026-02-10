@@ -57,6 +57,14 @@ blockquote {
     margin: 12pt 0;
 }
 
+/* 圖片樣式 */
+img {
+    max-width: 25%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+
 @media print {
     body {
         padding: 0;

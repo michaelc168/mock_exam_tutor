@@ -4,3 +4,22 @@ __pycache__/
 .env
 dist/
 build/
+
+# Frontend (Next.js)
+frontend/.next/
+frontend/out/
+frontend/.env*.local
+frontend/.vercel
+frontend/.turbo
+
+# Backend
+backend/__pycache__/
+backend/*.pyc
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+*.temp

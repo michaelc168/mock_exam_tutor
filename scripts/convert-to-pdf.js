@@ -63,7 +63,35 @@ async function convertToPdf(inputFile) {
         markdown = convertLatexToSvg(markdown);
 
         console.log('正在轉換 Markdown 為 HTML...');
-        const html = md.render(markdown);
+        let html = md.render(markdown);
+
+        // 處理圖片路徑 - 將相對路徑轉換為 Base64 嵌入
+        const inputDir = path.dirname(path.resolve(inputFile));
+        const imagesDir = path.resolve(inputDir, '..', 'images');
+        
+        html = html.replace(
+            /src="\.\.\/images\/([^"]+)"/g,
+            (match, filename) => {
+                const imagePath = path.join(imagesDir, filename);
+                
+                // 檢查圖片是否存在
+                if (!fs.existsSync(imagePath)) {
+                    console.log(`  ✗ 圖片不存在：${filename}`);
+                    return match;
+                }
+                
+                // 讀取圖片並轉換為 Base64
+                const imageBuffer = fs.readFileSync(imagePath);
+                const base64Image = imageBuffer.toString('base64');
+                const ext = path.extname(filename).toLowerCase();
+                const mimeType = ext === '.png' ? 'image/png' : 
+                                ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 
+                                ext === '.svg' ? 'image/svg+xml' : 'image/png';
+                
+                console.log(`  ✓ 圖片：${filename} (${(imageBuffer.length / 1024).toFixed(1)} KB)`);
+                return `src="data:${mimeType};base64,${base64Image}"`;
+            }
+        );
 
         // 讀取自訂 CSS 樣式
         const cssPath = path.join(__dirname, '..', 'pdf-style.css');
