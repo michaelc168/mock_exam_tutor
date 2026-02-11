@@ -9,11 +9,47 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import os
+import re
 import json
+import random
 from datetime import datetime
 import subprocess
 import pathlib
 from exam_parser import parse_exam_file
+from dotenv import load_dotenv
+
+# 載入環境變數
+load_dotenv()
+
+# LLM API for question variation (支援 Gemini 或 OpenAI)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()  # 預設用 Gemini
+
+# Gemini (Google)
+try:
+    import google.generativeai as genai
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        # 使用最新的 Gemini 2.5 Flash 模型
+        gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+    else:
+        gemini_model = None
+except ImportError:
+    gemini_model = None
+except Exception as e:
+    print(f"Gemini 初始化錯誤: {e}")
+    gemini_model = None
+
+# OpenAI
+try:
+    from openai import OpenAI
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    if OPENAI_API_KEY:
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    else:
+        openai_client = None
+except ImportError:
+    openai_client = None
 
 app = FastAPI(title="Mock Exam Tutor API", version="1.0.0")
 
@@ -116,18 +152,192 @@ def get_subject_bank_path(subject: str) -> pathlib.Path:
     return BANK_DIR / mapping.get(subject, "")
 
 def count_questions_in_bank(subject: str) -> int:
-    """計算題庫中的題目數量"""
+    """計算題庫中的題目數量（### 題號 格式）"""
     bank_path = get_subject_bank_path(subject)
     if not bank_path.exists():
         return 0
-    
     with open(bank_path, 'r', encoding='utf-8') as f:
         content = f.read()
-        # 簡單計算 ## 題目 的數量
-        return content.count('## 題目')
+    return len(re.findall(r'\n### \d+\.', content))
 
-def _write_exam_file(filepath: pathlib.Path, title: str, subject_label: str, num_questions: int) -> None:
-    """將考卷寫入 exams/generated/，確保會出現在「我的考卷」列表中"""
+
+def _parse_bank_questions(bank_path: pathlib.Path) -> List[dict]:
+    """從題庫檔解析出題目列表，每題為 {question: str, options: [A,B,C,D]}"""
+    if not bank_path.exists():
+        return []
+    with open(bank_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    questions = []
+    blocks = re.split(r'\n### \d+\.\s*\n', content)
+    for block in blocks[1:]:
+        block = block.strip()
+        if not block:
+            continue
+        opt_match = re.search(
+            r'\n\s*\(A\)\s*(.*?)\n\s*\(B\)\s*(.*?)\n\s*\(C\)\s*(.*?)\n\s*\(D\)\s*(.*)',
+            block, re.DOTALL
+        )
+        if not opt_match:
+            continue
+        q_text = block[:opt_match.start()].strip()
+        opts = [opt_match.group(i).strip() for i in range(1, 5)]
+        if q_text and len(opts) == 4:
+            questions.append({"question": q_text, "options": opts})
+    return questions
+
+
+def _sample_from_bank(subject: str, num_questions: int) -> List[dict]:
+    """從題庫隨機抽題。若題庫不足則重複使用。"""
+    bank_path = get_subject_bank_path(subject)
+    all_q = _parse_bank_questions(bank_path)
+    if not all_q:
+        return []
+    if num_questions <= len(all_q):
+        chosen = random.sample(all_q, num_questions)
+    else:
+        result = list(all_q)
+        while len(result) < num_questions:
+            result.append(random.choice(all_q))
+        chosen = result[:num_questions]
+    # 每題做變型：選項重排 + 數學可做數字變換
+    return [_apply_variation(q, subject) for q in chosen]
+
+
+def _rewrite_question_with_llm(q: dict, subject: str) -> dict:
+    """用 LLM 改寫題目：同概念、同難度，但新措辭、新數字、新情境。"""
+    subject_label = {"chinese": "國語", "english": "英語", "math": "數學"}[subject]
+    q_text = q.get("question", "")
+    opts = q.get("options", [])
+    
+    prompt = f"""你是私立國中入學考題的出題專家。請將以下題目「改寫/變型」：
+
+**原題**（{subject_label}科）：
+{q_text}
+
+(A) {opts[0] if len(opts) > 0 else ""}
+(B) {opts[1] if len(opts) > 1 else ""}
+(C) {opts[2] if len(opts) > 2 else ""}
+(D) {opts[3] if len(opts) > 3 else ""}
+
+**要求**：
+1. 保持相同的**題型**與**難度**（小六升國一程度）
+2. 改變**題目文字、情境、數字**，使其成為全新但類似的題目
+3. 產生 4 個新選項（A/B/C/D），其中一個為正確答案
+4. 如果是數學題，數字要合理且答案可計算；如果是語文題，改寫措辭但考點不變
+
+**輸出格式（只輸出以下 JSON，不要其他說明）**：
+{{
+  "question": "改寫後的題目文字",
+  "options": ["新選項A", "新選項B", "新選項C", "新選項D"],
+  "correct_answer": "A或B或C或D"
+}}
+"""
+    
+    try:
+        content = ""
+        
+        # 優先使用 Gemini（免費額度更高）
+        if LLM_PROVIDER == "gemini" and gemini_model:
+            # 設定較寬鬆的安全設定（避免內容被過濾）
+            safety_settings = {
+                genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            }
+            
+            response = gemini_model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.8,
+                    # 不設置 max_output_tokens，避免 deprecated SDK 的 bug
+                ),
+                safety_settings=safety_settings
+            )
+            
+            # 檢查回應狀態
+            if response.prompt_feedback.block_reason:
+                print(f"[WARNING] Gemini 回應被阻擋: {response.prompt_feedback.block_reason}")
+                return _shuffle_options_fallback(q)
+            
+            content = response.text.strip()
+        
+        # 備用 OpenAI
+        elif LLM_PROVIDER == "openai" and openai_client:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8,
+                max_tokens=1000,
+            )
+            content = response.choices[0].message.content.strip()
+        
+        # 無任何 API key
+        else:
+            print(f"無可用的 LLM API (provider={LLM_PROVIDER})，降級為選項打亂")
+            return _shuffle_options_fallback(q)
+        
+        # 去除可能的 markdown code block 標記
+        content = content.strip()
+        if content.startswith("```"):
+            # 移除開頭的 ```json 或 ```
+            content = re.sub(r'^```(?:json)?\s*\n', '', content)
+            # 移除結尾的 ```
+            content = re.sub(r'\n```\s*$', '', content)
+        content = content.strip()
+        
+        # Debug: 可選的調試輸出
+        # print(f"[DEBUG] 內容長度: {len(content)}")
+        
+        result = json.loads(content)
+        
+        # 清理選項中可能的 (A)、(B) 等前綴
+        cleaned_options = []
+        for opt in result.get("options", opts):
+            # 移除開頭的 (A)、(B)、(C)、(D) 和空格
+            cleaned = re.sub(r'^\([A-D]\)\s*', '', str(opt)).strip()
+            cleaned_options.append(cleaned)
+        
+        return {
+            "question": result.get("question", q_text),
+            "options": cleaned_options if cleaned_options else opts,
+            "correct_answer": result.get("correct_answer", "A"),
+        }
+    
+    except Exception as e:
+        print(f"LLM 改寫失敗: {e}，使用原題並打亂選項")
+        return _shuffle_options_fallback(q)
+
+
+def _shuffle_options_fallback(q: dict) -> dict:
+    """備案：打亂選項順序（假設第一項為正確）。"""
+    opts = list(q.get("options", []))
+    if len(opts) != 4:
+        return {**q, "correct_answer": "A"}
+    labels = ["A", "B", "C", "D"]
+    indexed = list(zip(labels, opts))
+    random.shuffle(indexed)
+    new_opts = [t[1] for t in indexed]
+    original_first = opts[0]
+    correct_letter = next(l for l, o in indexed if o == original_first)
+    return {
+        **q,
+        "options": new_opts,
+        "correct_answer": correct_letter,
+    }
+
+
+def _apply_variation(q: dict, subject: str) -> dict:
+    """對單題做變型：優先用 LLM 改寫，無 API key 時改為選項打亂。"""
+    return _rewrite_question_with_llm(q, subject)
+
+def _write_exam_file(
+    filepath: pathlib.Path,
+    title: str,
+    subject_label: str,
+    questions: List[dict],
+) -> None:
+    """將考卷寫入 exams/generated/，題目來自題庫或佔位"""
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     subject_map = {"國語科": "一、國語科", "英語科": "二、英語科", "數學科": "三、數學科"}
     section = subject_map.get(subject_label, "題目區")
@@ -146,13 +356,12 @@ def _write_exam_file(filepath: pathlib.Path, title: str, subject_label: str, num
         "### 題目區",
         "",
     ]
-    for i in range(1, min(num_questions, 50) + 1):
-        lines.append(f"{i}. （題目內容請由 AI 工作流程或題庫補充）<br>")
+    for i, q in enumerate(questions, 1):
+        lines.append(f"{i}. {q.get('question', '（題目待補充）')}<br>")
         lines.append("")
-        lines.append("   (A) 選項 A")
-        lines.append("   (B) 選項 B")
-        lines.append("   (C) 選項 C")
-        lines.append("   (D) 選項 D")
+        opts = q.get("options", ["選項 A", "選項 B", "選項 C", "選項 D"])
+        for label, text in zip(["A", "B", "C", "D"], opts):
+            lines.append(f"   ({label}) {text}")
         lines.append("")
     lines.extend([
         "---",
@@ -162,31 +371,57 @@ def _write_exam_file(filepath: pathlib.Path, title: str, subject_label: str, num
         "| 題號 | 答案 | 配分 | 考點 |",
         "|------|------|------|------|",
     ])
-    for i in range(1, min(num_questions, 50) + 1):
-        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    for i, q in enumerate(questions, 1):
+        ans = q.get("correct_answer", "A")
+        lines.append(f"| {i} | ({ans}) | 2 | 題庫出題 |")
     content = "\n".join(lines)
     filepath.write_text(content, encoding="utf-8")
 
 
 def generate_exam_with_ai(request: ExamRequest) -> str:
-    """使用 AI 生成考卷，並寫入檔案使「我的考卷」能列出"""
+    """從題庫抽題生成考卷，並寫入檔案"""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"exam-{request.subject}-{timestamp}.md"
     filepath = GENERATED_DIR / filename
     subject_label = {"chinese": "國語科", "english": "英語科", "math": "數學科"}[request.subject]
     title = f"私立國中入學模擬考 - {subject_label}"
-    _write_exam_file(filepath, title, subject_label, request.num_questions)
+    questions = _sample_from_bank(request.subject, request.num_questions)
+    if not questions:
+        # 題庫無題目時寫入佔位
+        questions = [
+            {"question": "（題目內容請由題庫或 AI 工作流程補充）", "options": ["選項 A", "選項 B", "選項 C", "選項 D"]}
+            for _ in range(min(request.num_questions, 50))
+        ]
+    _write_exam_file(filepath, title, subject_label, questions)
     return filename
 
 
 def generate_mixed_exam_with_ai(request: MixedExamRequest) -> str:
-    """生成綜合考卷，並寫入檔案使「我的考卷」能列出"""
+    """從題庫抽題生成綜合考卷（國語+英語+數學）"""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"mock-exam-{timestamp}-comprehensive.md"
     filepath = GENERATED_DIR / filename
-    total = request.chinese_count + request.english_count + request.math_count
     title = "私立國中入學模擬考 - 綜合版"
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
+    chinese_q = _sample_from_bank("chinese", request.chinese_count)
+    english_q = _sample_from_bank("english", request.english_count)
+    math_q = _sample_from_bank("math", request.math_count)
+
+    def placeholder_list(n: int) -> List[dict]:
+        return [
+            {"question": "（題目待補充）", "options": ["選項 A", "選項 B", "選項 C", "選項 D"]}
+            for _ in range(n)
+        ]
+    if not chinese_q and request.chinese_count:
+        chinese_q = placeholder_list(request.chinese_count)
+    if not english_q and request.english_count:
+        english_q = placeholder_list(request.english_count)
+    if not math_q and request.math_count:
+        math_q = placeholder_list(request.math_count)
+
+    n_ch, n_en, n_math = len(chinese_q), len(english_q), len(math_q)
+    total = n_ch + n_en + n_math
     lines = [
         f"# {title}",
         "",
@@ -202,33 +437,26 @@ def generate_mixed_exam_with_ai(request: MixedExamRequest) -> str:
         "### 題目區",
         "",
     ]
-    n = request.chinese_count
-    for i in range(1, n + 1):
-        lines.append(f"{i}. （國語題目待補充）<br>")
+    for i, q in enumerate(chinese_q, 1):
+        lines.append(f"{i}. {q.get('question', '（題目待補充）')}<br>")
         lines.append("")
-        lines.append("   (A) 選項 A")
-        lines.append("   (B) 選項 B")
-        lines.append("   (C) 選項 C")
-        lines.append("   (D) 選項 D")
+        for label, text in zip(["A", "B", "C", "D"], q.get("options", ["選項 A", "選項 B", "選項 C", "選項 D"])):
+            lines.append(f"   ({label}) {text}")
         lines.append("")
     lines.extend(["---", "", "## 二、英語科", "", "### 題目區", ""])
-    for i in range(n + 1, n + request.english_count + 1):
-        lines.append(f"{i}. （英語題目待補充）<br>")
+    for i, q in enumerate(english_q, n_ch + 1):
+        lines.append(f"{i}. {q.get('question', '（題目待補充）')}<br>")
         lines.append("")
-        lines.append("   (A) 選項 A")
-        lines.append("   (B) 選項 B")
-        lines.append("   (C) 選項 C")
-        lines.append("   (D) 選項 D")
+        for label, text in zip(["A", "B", "C", "D"], q.get("options", ["選項 A", "選項 B", "選項 C", "選項 D"])):
+            lines.append(f"   ({label}) {text}")
         lines.append("")
     lines.extend(["---", "", "## 三、數學科", "", "### 題目區", ""])
-    start = n + request.english_count + 1
-    for i in range(start, total + 1):
-        lines.append(f"{i}. （數學題目待補充）<br>")
+    start_math = n_ch + n_en + 1
+    for i, q in enumerate(math_q, start_math):
+        lines.append(f"{i}. {q.get('question', '（題目待補充）')}<br>")
         lines.append("")
-        lines.append("   (A) 選項 A")
-        lines.append("   (B) 選項 B")
-        lines.append("   (C) 選項 C")
-        lines.append("   (D) 選項 D")
+        for label, text in zip(["A", "B", "C", "D"], q.get("options", ["選項 A", "選項 B", "選項 C", "選項 D"])):
+            lines.append(f"   ({label}) {text}")
         lines.append("")
     lines.extend([
         "---",
@@ -240,14 +468,17 @@ def generate_mixed_exam_with_ai(request: MixedExamRequest) -> str:
         "| 題號 | 答案 | 配分 | 考點 |",
         "|------|------|------|------|",
     ])
-    for i in range(1, n + 1):
-        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    for i, q in enumerate(chinese_q, 1):
+        ans = q.get("correct_answer", "A")
+        lines.append(f"| {i} | ({ans}) | 2 | 題庫出題 |")
     lines.extend(["", "### 英語科答案", "", "| 題號 | 答案 | 配分 | 考點 |", "|------|------|------|------|"])
-    for i in range(n + 1, n + request.english_count + 1):
-        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    for i, q in enumerate(english_q, n_ch + 1):
+        ans = q.get("correct_answer", "A")
+        lines.append(f"| {i} | ({ans}) | 2 | 題庫出題 |")
     lines.extend(["", "### 數學科答案", "", "| 題號 | 答案 | 配分 | 考點 |", "|------|------|------|------|"])
-    for i in range(start, total + 1):
-        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    for i, q in enumerate(math_q, start_math):
+        ans = q.get("correct_answer", "A")
+        lines.append(f"| {i} | ({ans}) | 2 | 題庫出題 |")
     filepath.write_text("\n".join(lines), encoding="utf-8")
     return filename
 
