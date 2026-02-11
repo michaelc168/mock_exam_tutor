@@ -125,6 +125,41 @@ class ApiClient {
       subjects: Record<string, { name: string; question_count: number }>
     }>('/api/stats')
   }
+
+  async getExamForQuiz(examId: string) {
+    return this.request<{
+      exam_id: string
+      title: string
+      subject: string
+      questions: Array<{
+        id: number
+        subject: string
+        question: string
+        options: Array<{ label: string; text: string }>
+      }>
+      total_questions: number
+    }>(`/api/quiz/${examId}`)
+  }
+
+  async submitQuiz(examId: string, answers: Array<{ question_id: number; user_answer: string }>) {
+    return this.request<{
+      exam_id: string
+      subject: string
+      total_questions: number
+      correct_count: number
+      score: number
+      answers: Array<{
+        question_id: number
+        question: string
+        user_answer: string
+        correct_answer: string
+        is_correct: boolean
+      }>
+    }>('/api/quiz/submit', {
+      method: 'POST',
+      body: JSON.stringify({ exam_id: examId, answers }),
+    })
+  }
 }
 
 export const apiClient = new ApiClient()

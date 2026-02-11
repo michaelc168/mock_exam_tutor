@@ -5,6 +5,7 @@ FastAPI Backend for Mock Exam Tutor
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import os
@@ -12,6 +13,7 @@ import json
 from datetime import datetime
 import subprocess
 import pathlib
+from exam_parser import parse_exam_file
 
 app = FastAPI(title="Mock Exam Tutor API", version="1.0.0")
 
@@ -30,6 +32,7 @@ EXAMS_DIR = BASE_DIR / "exams"
 BANK_DIR = EXAMS_DIR / "bank"
 GENERATED_DIR = EXAMS_DIR / "generated"
 TEMPLATES_DIR = EXAMS_DIR / "templates"
+IMAGES_DIR = EXAMS_DIR / "images"
 
 # ==================== 資料模型 ====================
 
@@ -61,6 +64,46 @@ class ExamListItem(BaseModel):
     file_size: int
     has_pdf: bool
 
+class QuestionOption(BaseModel):
+    """選項"""
+    label: str
+    text: str
+
+class Question(BaseModel):
+    """題目"""
+    id: int
+    subject: str
+    question: str
+    options: List[QuestionOption]
+    correct_answer: Optional[str] = None
+
+class ExamForQuiz(BaseModel):
+    """答題用考卷"""
+    exam_id: str
+    title: str
+    subject: str
+    questions: List[Question]
+    total_questions: int
+
+class QuizAnswer(BaseModel):
+    """答題記錄"""
+    question_id: int
+    user_answer: str
+
+class SubmitQuizRequest(BaseModel):
+    """提交答案請求"""
+    exam_id: str
+    answers: List[QuizAnswer]
+
+class QuizResult(BaseModel):
+    """答題結果"""
+    exam_id: str
+    subject: str
+    total_questions: int
+    correct_count: int
+    score: int
+    answers: List[dict]
+
 # ==================== 輔助函數 ====================
 
 def get_subject_bank_path(subject: str) -> pathlib.Path:
@@ -83,18 +126,129 @@ def count_questions_in_bank(subject: str) -> int:
         # 簡單計算 ## 題目 的數量
         return content.count('## 題目')
 
+def _write_exam_file(filepath: pathlib.Path, title: str, subject_label: str, num_questions: int) -> None:
+    """將考卷寫入 exams/generated/，確保會出現在「我的考卷」列表中"""
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    subject_map = {"國語科": "一、國語科", "英語科": "二、英語科", "數學科": "三、數學科"}
+    section = subject_map.get(subject_label, "題目區")
+    lines = [
+        f"# {title}",
+        "",
+        "- 年級：小六升國一",
+        f"- 科目：{subject_label}",
+        "- 測驗時間：50 分鐘",
+        "- 滿分：100 分",
+        "",
+        "---",
+        "",
+        f"## {section}",
+        "",
+        "### 題目區",
+        "",
+    ]
+    for i in range(1, min(num_questions, 50) + 1):
+        lines.append(f"{i}. （題目內容請由 AI 工作流程或題庫補充）<br>")
+        lines.append("")
+        lines.append("   (A) 選項 A")
+        lines.append("   (B) 選項 B")
+        lines.append("   (C) 選項 C")
+        lines.append("   (D) 選項 D")
+        lines.append("")
+    lines.extend([
+        "---",
+        "",
+        "## 參考答案",
+        "",
+        "| 題號 | 答案 | 配分 | 考點 |",
+        "|------|------|------|------|",
+    ])
+    for i in range(1, min(num_questions, 50) + 1):
+        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    content = "\n".join(lines)
+    filepath.write_text(content, encoding="utf-8")
+
+
 def generate_exam_with_ai(request: ExamRequest) -> str:
-    """使用 AI 生成考卷（模擬）"""
-    # 這裡可以整合 Cursor 的規則，或直接呼叫 AI API
-    # 現在先用簡單的方式生成檔名
+    """使用 AI 生成考卷，並寫入檔案使「我的考卷」能列出"""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"exam-{request.subject}-{timestamp}.md"
+    filepath = GENERATED_DIR / filename
+    subject_label = {"chinese": "國語科", "english": "英語科", "math": "數學科"}[request.subject]
+    title = f"私立國中入學模擬考 - {subject_label}"
+    _write_exam_file(filepath, title, subject_label, request.num_questions)
     return filename
 
+
 def generate_mixed_exam_with_ai(request: MixedExamRequest) -> str:
-    """生成綜合考卷"""
+    """生成綜合考卷，並寫入檔案使「我的考卷」能列出"""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"mock-exam-{timestamp}-comprehensive.md"
+    filepath = GENERATED_DIR / filename
+    total = request.chinese_count + request.english_count + request.math_count
+    title = "私立國中入學模擬考 - 綜合版"
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# {title}",
+        "",
+        "- 年級：小六升國一",
+        "- 科目：國語、英語、數學",
+        "- 測驗時間：80 分鐘",
+        "- 滿分：100 分",
+        "",
+        "---",
+        "",
+        "## 一、國語科",
+        "",
+        "### 題目區",
+        "",
+    ]
+    n = request.chinese_count
+    for i in range(1, n + 1):
+        lines.append(f"{i}. （國語題目待補充）<br>")
+        lines.append("")
+        lines.append("   (A) 選項 A")
+        lines.append("   (B) 選項 B")
+        lines.append("   (C) 選項 C")
+        lines.append("   (D) 選項 D")
+        lines.append("")
+    lines.extend(["---", "", "## 二、英語科", "", "### 題目區", ""])
+    for i in range(n + 1, n + request.english_count + 1):
+        lines.append(f"{i}. （英語題目待補充）<br>")
+        lines.append("")
+        lines.append("   (A) 選項 A")
+        lines.append("   (B) 選項 B")
+        lines.append("   (C) 選項 C")
+        lines.append("   (D) 選項 D")
+        lines.append("")
+    lines.extend(["---", "", "## 三、數學科", "", "### 題目區", ""])
+    start = n + request.english_count + 1
+    for i in range(start, total + 1):
+        lines.append(f"{i}. （數學題目待補充）<br>")
+        lines.append("")
+        lines.append("   (A) 選項 A")
+        lines.append("   (B) 選項 B")
+        lines.append("   (C) 選項 C")
+        lines.append("   (D) 選項 D")
+        lines.append("")
+    lines.extend([
+        "---",
+        "",
+        "## 參考答案",
+        "",
+        "### 國語科答案",
+        "",
+        "| 題號 | 答案 | 配分 | 考點 |",
+        "|------|------|------|------|",
+    ])
+    for i in range(1, n + 1):
+        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    lines.extend(["", "### 英語科答案", "", "| 題號 | 答案 | 配分 | 考點 |", "|------|------|------|------|"])
+    for i in range(n + 1, n + request.english_count + 1):
+        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    lines.extend(["", "### 數學科答案", "", "| 題號 | 答案 | 配分 | 考點 |", "|------|------|------|------|"])
+    for i in range(start, total + 1):
+        lines.append(f"| {i} | (A) | 2 | 待補充 |")
+    filepath.write_text("\n".join(lines), encoding="utf-8")
     return filename
 
 # ==================== API 端點 ====================
@@ -293,6 +447,100 @@ async def get_stats():
         }
     
     return stats
+
+@app.get("/api/quiz/{exam_id}", response_model=ExamForQuiz)
+async def get_exam_for_quiz(exam_id: str):
+    """取得考卷資料供答題使用（不包含答案）"""
+    md_file = GENERATED_DIR / f"{exam_id}.md"
+    
+    if not md_file.exists():
+        raise HTTPException(status_code=404, detail="考卷不存在")
+    
+    # 解析考卷
+    exam_data = parse_exam_file(md_file)
+    if not exam_data:
+        raise HTTPException(status_code=500, detail="考卷解析失敗")
+    
+    # 移除答案（不要傳給前端）
+    questions = []
+    for q in exam_data['questions']:
+        # 建立不含答案的題目
+        questions.append(Question(
+            id=q['id'],
+            subject=q['subject'],
+            question=q['question'],
+            options=[
+                QuestionOption(label=opt['label'], text=opt['text'])
+                for opt in q['options']
+            ]
+        ))
+    
+    return ExamForQuiz(
+        exam_id=exam_id,
+        title=exam_data['title'],
+        subject=exam_data['subject'],
+        total_questions=exam_data['total_questions'],
+        questions=questions
+    )
+
+@app.get("/api/images/{filename}")
+async def get_image(filename: str):
+    """取得考卷圖片"""
+    image_path = IMAGES_DIR / filename
+    
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="圖片不存在")
+    
+    return FileResponse(image_path)
+
+@app.post("/api/quiz/submit", response_model=QuizResult)
+async def submit_quiz(request: SubmitQuizRequest):
+    """提交答案並評分"""
+    md_file = GENERATED_DIR / f"{request.exam_id}.md"
+    
+    if not md_file.exists():
+        raise HTTPException(status_code=404, detail="考卷不存在")
+    
+    # 解析考卷（含答案）
+    exam_data = parse_exam_file(md_file)
+    if not exam_data:
+        raise HTTPException(status_code=500, detail="考卷解析失敗")
+    
+    # 建立答案對照表
+    user_answers_dict = {ans.question_id: ans.user_answer for ans in request.answers}
+    
+    # 評分
+    correct_count = 0
+    answer_details = []
+    
+    for q in exam_data['questions']:
+        q_id = q['id']
+        correct_ans = q.get('correct_answer', '')
+        user_ans = user_answers_dict.get(q_id, '')
+        is_correct = user_ans == correct_ans
+        
+        if is_correct:
+            correct_count += 1
+        
+        answer_details.append({
+            'question_id': q_id,
+            'question': q['question'],
+            'user_answer': user_ans,
+            'correct_answer': correct_ans,
+            'is_correct': is_correct
+        })
+    
+    total = exam_data['total_questions']
+    score = int((correct_count / total) * 100) if total > 0 else 0
+    
+    return QuizResult(
+        exam_id=request.exam_id,
+        subject=exam_data['subject'],
+        total_questions=total,
+        correct_count=correct_count,
+        score=score,
+        answers=answer_details
+    )
 
 if __name__ == "__main__":
     import uvicorn

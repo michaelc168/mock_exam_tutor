@@ -113,14 +113,22 @@ export default function ExamsPage() {
                   </div>
                 </div>
 
-                <a
-                  href={apiClient.getDownloadUrl(exam.exam_id)}
-                  download
-                  className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
-                >
-                  <Download className="h-4 w-4" />
-                  下載
-                </a>
+                <div className="flex gap-2">
+                  <Link
+                    href={`/quiz/${exam.exam_id}`}
+                    className="flex items-center gap-2 rounded-lg border-2 border-primary bg-white px-4 py-2 text-sm font-semibold text-primary hover:bg-primary/5"
+                  >
+                    開始作答
+                  </Link>
+                  <a
+                    href={apiClient.getDownloadUrl(exam.exam_id)}
+                    download
+                    className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+                  >
+                    <Download className="h-4 w-4" />
+                    下載
+                  </a>
+                </div>
               </div>
             ))}
           </div>
